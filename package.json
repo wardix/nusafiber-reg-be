@@ -1,0 +1,24 @@
+{
+  "name": "nusafiber-reg-be",
+  "version": "1.0.0",
+  "description": "Nusafiber Selecta Registration API",
+  "main": "src/main.ts",
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun dist/main.js",
+    "build": "bun build src/main.ts --outdir ./dist",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "^3.10.0",
+    "@hono/zod-validator": "^0.2.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-types": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
