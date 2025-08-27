@@ -4,10 +4,9 @@
   "description": "Nusafiber Selecta Registration API",
   "main": "src/main.ts",
   "scripts": {
-    "dev": "bun --watch src/main.ts",
+    "dev": "bun run --hot src/main.ts",
     "start": "bun dist/main.js",
-    "build": "bun build src/main.ts --outdir ./dist",
-    "test": "bun test"
+    "build": "bun build --minify --outfile dist/main.js --target bun src/main.ts",
   },
   "dependencies": {
     "hono": "^3.10.0",
