@@ -30,6 +30,7 @@ interface RegistrationData {
     address: string
   }
   ktpFileName?: string
+  housePhotoFileName?: string
   submittedAt: string
 }
 
@@ -75,11 +76,11 @@ async function ensureUploadDir() {
   return uploadDir
 }
 
-async function saveFile(file: File): Promise<string> {
+async function saveFile(file: File, prefix: string): Promise<string> {
   const uploadDir = await ensureUploadDir()
   const timestamp = Date.now()
   const extension = path.extname(file.name)
-  const filename = `ktp_${timestamp}${extension}`
+  const filename = `${prefix}_${timestamp}${extension}`
   const filepath = path.join(uploadDir, filename)
 
   const buffer = await file.arrayBuffer()
@@ -88,7 +89,7 @@ async function saveFile(file: File): Promise<string> {
   return filename
 }
 
-function validateFile(file: File): { isValid: boolean; error?: string } {
+function validateKTPFile(file: File): { isValid: boolean; error?: string } {
   const allowedTypes = [
     'image/jpeg',
     'image/jpg',
@@ -100,14 +101,38 @@ function validateFile(file: File): { isValid: boolean; error?: string } {
   if (!allowedTypes.includes(file.type)) {
     return {
       isValid: false,
-      error: 'Format file tidak valid. Gunakan JPG, PNG, atau PDF.',
+      error: 'Format file KTP tidak valid. Gunakan JPG, PNG, atau PDF.',
     }
   }
 
   if (file.size > maxSize) {
     return {
       isValid: false,
-      error: 'Ukuran file terlalu besar. Maksimal 5MB.',
+      error: 'Ukuran file KTP terlalu besar. Maksimal 5MB.',
+    }
+  }
+
+  return { isValid: true }
+}
+
+function validateHousePhotoFile(file: File): {
+  isValid: boolean
+  error?: string
+} {
+  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png']
+  const maxSize = 5 * 1024 * 1024 // 5MB
+
+  if (!allowedTypes.includes(file.type)) {
+    return {
+      isValid: false,
+      error: 'Format foto rumah tidak valid. Gunakan JPG atau PNG.',
+    }
+  }
+
+  if (file.size > maxSize) {
+    return {
+      isValid: false,
+      error: 'Ukuran foto rumah terlalu besar. Maksimal 5MB.',
     }
   }
 
@@ -169,6 +194,7 @@ app.post('/api/register', async (c) => {
     const phoneNumber = formData.get('phoneNumber') as string
     const locationStr = formData.get('location') as string
     const ktpFile = formData.get('ktpFile') as File
+    const housePhotoFile = formData.get('housePhotoFile') as File
 
     // Basic validation
     if (
@@ -176,14 +202,15 @@ app.post('/api/register', async (c) => {
       !customerName ||
       !phoneNumber ||
       !locationStr ||
-      !ktpFile
+      !ktpFile ||
+      !housePhotoFile
     ) {
       return c.json(
         {
           success: false,
           error: 'Missing required fields',
           details:
-            'All fields (homepassId, customerName, phoneNumber, location, ktpFile) are required',
+            'All fields (homepassId, customerName, phoneNumber, location, ktpFile, housePhotoFile) are required',
         },
         400,
       )
@@ -223,29 +250,45 @@ app.post('/api/register', async (c) => {
       )
     }
 
-    // Validate file
-    const fileValidation = validateFile(ktpFile)
-    if (!fileValidation.isValid) {
+    // Validate KTP file
+    const ktpFileValidation = validateKTPFile(ktpFile)
+    if (!ktpFileValidation.isValid) {
       return c.json(
         {
           success: false,
-          error: 'File validation failed',
-          details: fileValidation.error,
+          error: 'KTP file validation failed',
+          details: ktpFileValidation.error,
         },
         400,
       )
     }
 
-    // Save file
+    // Validate house photo file
+    const housePhotoValidation = validateHousePhotoFile(housePhotoFile)
+    if (!housePhotoValidation.isValid) {
+      return c.json(
+        {
+          success: false,
+          error: 'House photo file validation failed',
+          details: housePhotoValidation.error,
+        },
+        400,
+      )
+    }
+
+    // Save files
     let ktpFileName: string
+    let housePhotoFileName: string
+
     try {
-      ktpFileName = await saveFile(ktpFile)
+      ktpFileName = await saveFile(ktpFile, 'ktp')
+      housePhotoFileName = await saveFile(housePhotoFile, 'house_photo')
     } catch (error) {
       console.error('File save error:', error)
       return c.json(
         {
           success: false,
-          error: 'Failed to save file',
+          error: 'Failed to save files',
           details: 'Internal server error during file upload',
         },
         500,
@@ -256,6 +299,7 @@ app.post('/api/register', async (c) => {
     const registrationData: RegistrationData = {
       ...validationResult.data,
       ktpFileName,
+      housePhotoFileName,
       submittedAt: new Date().toISOString(),
     }
 
@@ -283,6 +327,8 @@ app.post('/api/register', async (c) => {
         customerName: registrationData.customerName,
         submittedAt: registrationData.submittedAt,
         referenceId: `NSF-${Date.now()}`,
+        ktpFileName: registrationData.ktpFileName,
+        housePhotoFileName: registrationData.housePhotoFileName,
       },
     })
   } catch (error) {
