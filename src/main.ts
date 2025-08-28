@@ -368,7 +368,7 @@ const port = process.env.PORT || 3001
 
 console.log(`🚀 Nusafiber Selecta API Server running on port ${port}`)
 
-export default {
+Bun.serve({
   port,
   fetch: app.fetch,
-}
+})
