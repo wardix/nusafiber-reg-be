@@ -193,7 +193,7 @@ async function saveRegistrationData(data: RegistrationData): Promise<void> {
     const insertQuery = `
       INSERT INTO registrations 
       (homepass_id, customer_name, phone_number, lat, lng, address, ktp_file_name, house_photo_file_name, submitted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `
 
     const values = [
@@ -205,7 +205,6 @@ async function saveRegistrationData(data: RegistrationData): Promise<void> {
       data.location.address,
       data.ktpFileName,
       data.housePhotoFileName,
-      data.submittedAt,
     ]
 
     await connection.execute(insertQuery, values)
