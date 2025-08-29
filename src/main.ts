@@ -5,6 +5,18 @@ import { z } from 'zod'
 import { writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import path from 'path'
+import mysql from 'mysql2/promise'
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASS,
+  database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  namedPlaceholders: true,
+})
 
 const app = new Hono()
 
@@ -66,6 +78,41 @@ const registrationSchema = z.object({
   phoneNumber: phoneSchema,
   location: locationSchema,
 })
+
+// Database initialization
+async function initializeDatabase() {
+  try {
+    const connection = await pool.getConnection()
+
+    // Create registrations table if it doesn't exist
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS registrations (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        homepass_id VARCHAR(20) NOT NULL UNIQUE,
+        customer_name VARCHAR(100) NOT NULL,
+        phone_number VARCHAR(13) NOT NULL,
+        lat DECIMAL(10, 8) NOT NULL,
+        lng DECIMAL(11, 8) NOT NULL,
+        address TEXT NOT NULL,
+        ktp_file_name VARCHAR(255),
+        house_photo_file_name VARCHAR(255),
+        submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_homepass_id (homepass_id),
+        INDEX idx_submitted_at (submitted_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `
+
+    await connection.execute(createTableQuery)
+    connection.release()
+
+    console.log('✅ Database table initialized successfully')
+  } catch (error) {
+    console.error('❌ Failed to initialize database:', error)
+    throw error
+  }
+}
 
 // Utility functions
 async function ensureUploadDir() {
@@ -140,26 +187,54 @@ function validateHousePhotoFile(file: File): {
 }
 
 async function saveRegistrationData(data: RegistrationData): Promise<void> {
-  const dataDir = path.join(process.cwd(), 'data')
-  if (!existsSync(dataDir)) {
-    await mkdir(dataDir, { recursive: true })
-  }
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const filename = `registration_${timestamp}.json`
-  const filepath = path.join(dataDir, filename)
-
-  await writeFile(filepath, JSON.stringify(data, null, 2))
-
-  // Also append to main log file
-  const logFile = path.join(dataDir, 'registrations.jsonl')
-  const logEntry = JSON.stringify(data) + '\n'
-
   try {
-    await writeFile(logFile, logEntry, { flag: 'a' })
+    const connection = await pool.getConnection()
+
+    const insertQuery = `
+      INSERT INTO registrations 
+      (homepass_id, customer_name, phone_number, lat, lng, address, ktp_file_name, house_photo_file_name, submitted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `
+
+    const values = [
+      data.homepassId,
+      data.customerName,
+      data.phoneNumber,
+      data.location.lat,
+      data.location.lng,
+      data.location.address,
+      data.ktpFileName,
+      data.housePhotoFileName,
+      data.submittedAt,
+    ]
+
+    await connection.execute(insertQuery, values)
+    connection.release()
+
+    console.log(`✅ Registration data saved for ${data.homepassId}`)
   } catch (error) {
-    // If file doesn't exist, create it
-    await writeFile(logFile, logEntry)
+    console.error('❌ Failed to save registration data:', error)
+    throw error
+  }
+}
+
+// Check if homepass ID already exists
+async function checkHomepassIdExists(homepassId: string): Promise<boolean> {
+  try {
+    const connection = await pool.getConnection()
+
+    const checkQuery = `
+      SELECT COUNT(*) as count FROM registrations 
+      WHERE homepass_id = ?
+    `
+
+    const [rows] = (await connection.execute(checkQuery, [homepassId])) as any[]
+    connection.release()
+
+    return rows[0].count > 0
+  } catch (error) {
+    console.error('❌ Failed to check homepass ID:', error)
+    throw error
   }
 }
 
@@ -170,17 +245,38 @@ app.get('/', (c) => {
     version: '1.0.0',
     endpoints: {
       register: 'POST /api/register',
+      registrations: 'GET /api/registrations',
       health: 'GET /api/health',
     },
   })
 })
 
-app.get('/api/health', (c) => {
-  return c.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-  })
+app.get('/api/health', async (c) => {
+  try {
+    // Test database connection
+    const connection = await pool.getConnection()
+    await connection.ping()
+    connection.release()
+
+    return c.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      database: 'connected',
+    })
+  } catch (error) {
+    return c.json(
+      {
+        status: 'unhealthy',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        database: 'disconnected',
+        error:
+          error instanceof Error ? error.message : 'Database connection failed',
+      },
+      503,
+    )
+  }
 })
 
 // Registration endpoint
@@ -250,6 +346,19 @@ app.post('/api/register', async (c) => {
       )
     }
 
+    // Check if homepass ID already exists
+    const exists = await checkHomepassIdExists(homepassId)
+    if (exists) {
+      return c.json(
+        {
+          success: false,
+          error: 'Duplicate registration',
+          details: 'Homepass ID sudah terdaftar sebelumnya',
+        },
+        409,
+      )
+    }
+
     // Validate KTP file
     const ktpFileValidation = validateKTPFile(ktpFile)
     if (!ktpFileValidation.isValid) {
@@ -303,11 +412,11 @@ app.post('/api/register', async (c) => {
       submittedAt: new Date().toISOString(),
     }
 
-    // Save registration data
+    // Save registration data to database
     try {
       await saveRegistrationData(registrationData)
     } catch (error) {
-      console.error('Data save error:', error)
+      console.error('Database save error:', error)
       return c.json(
         {
           success: false,
@@ -348,28 +457,69 @@ app.post('/api/register', async (c) => {
 // Get registrations (for admin)
 app.get('/api/registrations', async (c) => {
   try {
-    const dataDir = path.join(process.cwd(), 'data')
-    const logFile = path.join(dataDir, 'registrations.jsonl')
+    const connection = await pool.getConnection()
 
-    if (!existsSync(logFile)) {
-      return c.json({
-        success: true,
-        data: [],
-        count: 0,
-      })
-    }
+    // Get query parameters for pagination
+    const page = parseInt(c.req.query('page') || '1')
+    const limit = parseInt(c.req.query('limit') || '50')
+    const offset = (page - 1) * limit
 
-    const content = await Bun.file(logFile).text()
-    const lines = content
-      .trim()
-      .split('\n')
-      .filter((line) => line.length > 0)
-    const registrations = lines.map((line) => JSON.parse(line))
+    // Get total count
+    const [countResult] = (await connection.execute(
+      'SELECT COUNT(*) as total FROM registrations',
+    )) as any[]
+    const total = countResult[0].total
+
+    // Get registrations with pagination
+    const [rows] = (await connection.execute(
+      `
+      SELECT 
+        id,
+        homepass_id,
+        customer_name,
+        phone_number,
+        lat,
+        lng,
+        address,
+        ktp_file_name,
+        house_photo_file_name,
+        submitted_at,
+        created_at,
+        updated_at
+      FROM registrations 
+      ORDER BY submitted_at DESC
+      LIMIT ? OFFSET ?
+    `,
+      [limit, offset],
+    )) as any[]
+
+    connection.release()
+
+    // Transform data to match original format
+    const registrations = rows.map((row: any) => ({
+      homepassId: row.homepass_id,
+      customerName: row.customer_name,
+      phoneNumber: row.phone_number,
+      location: {
+        lat: parseFloat(row.lat),
+        lng: parseFloat(row.lng),
+        address: row.address,
+      },
+      ktpFileName: row.ktp_file_name,
+      housePhotoFileName: row.house_photo_file_name,
+      submittedAt: row.submitted_at,
+      id: row.id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }))
 
     return c.json({
       success: true,
       data: registrations,
       count: registrations.length,
+      total: total,
+      page: page,
+      totalPages: Math.ceil(total / limit),
     })
   } catch (error) {
     console.error('Get registrations error:', error)
@@ -377,6 +527,82 @@ app.get('/api/registrations', async (c) => {
       {
         success: false,
         error: 'Failed to retrieve registrations',
+        details:
+          error instanceof Error ? error.message : 'Unknown error occurred',
+      },
+      500,
+    )
+  }
+})
+
+// Get single registration by homepass ID
+app.get('/api/registrations/:homepassId', async (c) => {
+  try {
+    const homepassId = c.req.param('homepassId')
+    const connection = await pool.getConnection()
+
+    const [rows] = (await connection.execute(
+      `
+      SELECT 
+        id,
+        homepass_id,
+        customer_name,
+        phone_number,
+        lat,
+        lng,
+        address,
+        ktp_file_name,
+        house_photo_file_name,
+        submitted_at,
+        created_at,
+        updated_at
+      FROM registrations 
+      WHERE homepass_id = ?
+    `,
+      [homepassId],
+    )) as any[]
+
+    connection.release()
+
+    if (rows.length === 0) {
+      return c.json(
+        {
+          success: false,
+          error: 'Registration not found',
+          details: 'No registration found with the specified Homepass ID',
+        },
+        404,
+      )
+    }
+
+    const row = rows[0]
+    const registration = {
+      homepassId: row.homepass_id,
+      customerName: row.customer_name,
+      phoneNumber: row.phone_number,
+      location: {
+        lat: parseFloat(row.lat),
+        lng: parseFloat(row.lng),
+        address: row.address,
+      },
+      ktpFileName: row.ktp_file_name,
+      housePhotoFileName: row.house_photo_file_name,
+      submittedAt: row.submitted_at,
+      id: row.id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }
+
+    return c.json({
+      success: true,
+      data: registration,
+    })
+  } catch (error) {
+    console.error('Get registration error:', error)
+    return c.json(
+      {
+        success: false,
+        error: 'Failed to retrieve registration',
         details:
           error instanceof Error ? error.message : 'Unknown error occurred',
       },
@@ -410,11 +636,26 @@ app.onError((err, c) => {
   )
 })
 
+// Initialize database and start server
 const port = process.env.PORT || 3001
 
-console.log(`🚀 Nusafiber Selecta API Server running on port ${port}`)
+async function startServer() {
+  try {
+    // Initialize database first
+    await initializeDatabase()
 
-Bun.serve({
-  port,
-  fetch: app.fetch,
-})
+    console.log(`🚀 Nusafiber Selecta API Server running on port ${port}`)
+    console.log(`📊 Database: MySQL`)
+    console.log(`📁 File uploads: ./uploads/`)
+
+    Bun.serve({
+      port,
+      fetch: app.fetch,
+    })
+  } catch (error) {
+    console.error('❌ Failed to start server:', error)
+    process.exit(1)
+  }
+}
+
+startServer()
